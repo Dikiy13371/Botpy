@@ -85,8 +85,9 @@ class BitrixStatusParser:
         """
         try:
             session = await self._get_session()
-            timeout = aiohttp.ClientTimeout(total=5)
-            async with session.head(self.url, timeout=timeout) as response:
+            # Используем timeout из сессии или создаем новый для этого запроса
+            quick_timeout = aiohttp.ClientTimeout(total=5)
+            async with session.head(self.url, timeout=quick_timeout) as response:
                 return response.status == 200
         except Exception as e:
             logger.warning(f"URL недоступен: {e}")
@@ -103,7 +104,8 @@ class BitrixStatusParser:
         
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                async with session.get(self.url) as response:
+                # Используем timeout из сессии (уже установлен при создании)
+                async with session.get(self.url, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as response:
                     # Проверяем статус код
                     if response.status == 502 or response.status == 503:
                         # Сервер временно недоступен, пробуем еще раз
