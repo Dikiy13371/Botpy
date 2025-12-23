@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  bitrix24-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bitrix24-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Данные подписчиков
+      - ./data:/app/data
+      # Логи
+      - ./logs:/app/logs
+    environment:
+      # Переопределяем пути для работы с volumes
+      - SUBSCRIBERS_FILE=/app/data/subscribers.json
+      - LOG_FILE=/app/logs/bot.log
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
