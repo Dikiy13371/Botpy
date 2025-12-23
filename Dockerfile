@@ -23,7 +23,6 @@ RUN mkdir -p /app/data /app/logs
 
 # Устанавливаем переменные окружения по умолчанию
 ENV PYTHONUNBUFFERED=1
-ENV SUBSCRIBERS_FILE=/app/data/subscribers.json
 ENV LOG_FILE=/app/logs/bot.log
 
 # Health check

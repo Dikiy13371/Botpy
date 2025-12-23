@@ -47,6 +47,8 @@ bot.log*
 subscribers.json
 data/
 logs/
+*.db
+*.db-journal
 
 # OS
 .DS_Store

@@ -1,60 +1,25 @@
-"""Управление подписчиками бота."""
+"""Управление подписчиками бота с использованием SQLite."""
 
-import json
-import os
 import logging
-from typing import Set
+from typing import Set, List
+from services.database import Database
 
 logger = logging.getLogger(__name__)
 
 
 class SubscriberManager:
-    """Класс для управления подписчиками бота."""
+    """Класс для управления подписчиками бота с использованием SQLite."""
     
-    def __init__(self, subscribers_file: str):
+    def __init__(self, database: Database):
         """
         Инициализирует менеджер подписчиков.
         
         Args:
-            subscribers_file: Путь к файлу с подписчиками
+            database: Экземпляр базы данных
         """
-        self.subscribers_file = subscribers_file
-        self.subscribers: Set[int] = set()
-        self.load_subscribers()
+        self.db = database
     
-    def load_subscribers(self) -> None:
-        """Загружает список подписчиков из файла."""
-        # Создаем директорию если нужно
-        subscribers_dir = os.path.dirname(self.subscribers_file)
-        if subscribers_dir and not os.path.exists(subscribers_dir):
-            os.makedirs(subscribers_dir, exist_ok=True)
-            logger.info(f"Создана директория для подписчиков: {subscribers_dir}")
-        
-        if os.path.exists(self.subscribers_file):
-            try:
-                with open(self.subscribers_file, 'r', encoding='utf-8') as f:
-                    self.subscribers = set(json.load(f))
-                logger.info(f"📋 Загружено {len(self.subscribers)} подписчиков")
-            except json.JSONDecodeError as e:
-                logger.error(f"Ошибка парсинга JSON файла подписчиков: {e}")
-                self.subscribers = set()
-            except Exception as e:
-                logger.error(f"Ошибка загрузки подписчиков: {e}")
-                self.subscribers = set()
-        else:
-            logger.info("Файл подписчиков не найден, создан новый список")
-            self.subscribers = set()
-    
-    def save_subscribers(self) -> None:
-        """Сохраняет список подписчиков в файл."""
-        try:
-            with open(self.subscribers_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.subscribers), f, ensure_ascii=False, indent=2)
-            logger.debug(f"Сохранено {len(self.subscribers)} подписчиков")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения подписчиков: {e}")
-    
-    def add_subscriber(self, chat_id: int) -> bool:
+    async def add_subscriber(self, chat_id: int) -> bool:
         """
         Добавляет подписчика.
         
@@ -64,14 +29,29 @@ class SubscriberManager:
         Returns:
             bool: True если подписчик был добавлен, False если уже был подписан
         """
-        if chat_id not in self.subscribers:
-            self.subscribers.add(chat_id)
-            self.save_subscribers()
+        try:
+            # Проверяем, существует ли уже подписчик
+            existing = await self.db.fetchone(
+                'SELECT chat_id FROM subscribers WHERE chat_id = ?',
+                (chat_id,)
+            )
+            
+            if existing:
+                return False
+            
+            # Добавляем нового подписчика
+            await self.db.execute(
+                'INSERT INTO subscribers (chat_id) VALUES (?)',
+                (chat_id,)
+            )
+            await self.db.commit()
             logger.info(f"Добавлен подписчик: {chat_id}")
             return True
-        return False
+        except Exception as e:
+            logger.error(f"Ошибка добавления подписчика: {e}")
+            return False
     
-    def remove_subscriber(self, chat_id: int) -> bool:
+    async def remove_subscriber(self, chat_id: int) -> bool:
         """
         Удаляет подписчика.
         
@@ -81,14 +61,22 @@ class SubscriberManager:
         Returns:
             bool: True если подписчик был удален, False если не был подписан
         """
-        if chat_id in self.subscribers:
-            self.subscribers.remove(chat_id)
-            self.save_subscribers()
-            logger.info(f"Удален подписчик: {chat_id}")
-            return True
-        return False
+        try:
+            cursor = await self.db.execute(
+                'DELETE FROM subscribers WHERE chat_id = ?',
+                (chat_id,)
+            )
+            await self.db.commit()
+            
+            if cursor.rowcount > 0:
+                logger.info(f"Удален подписчик: {chat_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка удаления подписчика: {e}")
+            return False
     
-    def is_subscribed(self, chat_id: int) -> bool:
+    async def is_subscribed(self, chat_id: int) -> bool:
         """
         Проверяет, подписан ли пользователь.
         
@@ -98,23 +86,45 @@ class SubscriberManager:
         Returns:
             bool: True если подписан
         """
-        return chat_id in self.subscribers
+        try:
+            result = await self.db.fetchone(
+                'SELECT chat_id FROM subscribers WHERE chat_id = ?',
+                (chat_id,)
+            )
+            return result is not None
+        except Exception as e:
+            logger.error(f"Ошибка проверки подписки: {e}")
+            return False
     
-    def get_count(self) -> int:
+    async def get_count(self) -> int:
         """
         Возвращает количество подписчиков.
         
         Returns:
             int: Количество подписчиков
         """
-        return len(self.subscribers)
+        try:
+            result = await self.db.fetchone('SELECT COUNT(*) as count FROM subscribers')
+            return result['count'] if result else 0
+        except Exception as e:
+            logger.error(f"Ошибка получения количества подписчиков: {e}")
+            return 0
     
-    def get_all(self) -> Set[int]:
+    async def get_all(self) -> Set[int]:
         """
         Возвращает множество всех подписчиков.
         
         Returns:
             Set[int]: Множество ID подписчиков
         """
-        return self.subscribers.copy()
-
+        try:
+            rows = await self.db.fetchall('SELECT chat_id FROM subscribers')
+            return {row['chat_id'] for row in rows}
+        except Exception as e:
+            logger.error(f"Ошибка получения списка подписчиков: {e}")
+            return set()
+    
+    async def load_subscribers(self) -> None:
+        """Загружает список подписчиков (для совместимости)."""
+        count = await self.get_count()
+        logger.info(f"📋 Загружено {count} подписчиков из БД")

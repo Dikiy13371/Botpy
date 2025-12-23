@@ -1,19 +1,28 @@
-"""Парсер статуса Bitrix24."""
+"""Парсер статуса Bitrix24 с поддержкой компонентов и exponential backoff."""
 
 import re
 import logging
-import requests
+import random
+import aiohttp
 from bs4 import BeautifulSoup
-from typing import Dict, Optional
-from time import sleep, time as current_time
+from typing import Dict, Optional, List
+from time import time as current_time
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 
 class BitrixStatusParser:
-    """Класс для парсинга статуса Bitrix24."""
+    """Класс для парсинга статуса Bitrix24 с поддержкой компонентов."""
     
-    def __init__(self, url: str, timeout: int = 10, retry_attempts: int = 3, retry_delay: int = 5, cache_ttl: int = 30):
+    def __init__(
+        self, 
+        url: str, 
+        timeout: int = 10, 
+        retry_attempts: int = 3, 
+        retry_delay: int = 5,
+        cache_ttl: int = 30
+    ):
         """
         Инициализирует парсер.
         
@@ -21,21 +30,53 @@ class BitrixStatusParser:
             url: URL страницы статуса
             timeout: Таймаут запроса в секундах
             retry_attempts: Количество попыток при ошибке
-            retry_delay: Задержка между попытками в секундах
+            retry_delay: Начальная задержка между попытками в секундах
             cache_ttl: Время жизни кэша в секундах
         """
         self.url = url
-        self.timeout = timeout
+        self.timeout_seconds = timeout
         self.retry_attempts = retry_attempts
-        self.retry_delay = retry_delay
+        self.base_retry_delay = retry_delay
         self.cache_ttl = cache_ttl
         self.cache: Optional[Dict] = None
         self.cache_time: float = 0
+        self.session: Optional[aiohttp.ClientSession] = None
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
     
-    def _check_url_availability(self) -> bool:
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Получает или создает aiohttp сессию."""
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers=self.headers
+            )
+        return self.session
+    
+    async def close(self) -> None:
+        """Закрывает aiohttp сессию."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+    
+    async def _exponential_backoff(self, attempt: int) -> float:
+        """
+        Вычисляет задержку с экспоненциальным увеличением.
+        
+        Args:
+            attempt: Номер попытки (начинается с 1)
+            
+        Returns:
+            float: Задержка в секундах
+        """
+        # Exponential backoff: base_delay * (2 ^ (attempt - 1))
+        delay = self.base_retry_delay * (2 ** (attempt - 1))
+        # Добавляем небольшую случайную задержку (jitter) для избежания thundering herd
+        jitter = random.uniform(0, delay * 0.1)
+        return delay + jitter
+    
+    async def _check_url_availability(self) -> bool:
         """
         Проверяет доступность URL перед парсингом.
         
@@ -43,42 +84,103 @@ class BitrixStatusParser:
             bool: True если URL доступен
         """
         try:
-            response = requests.head(self.url, headers=self.headers, timeout=5)
-            return response.status_code == 200
+            session = await self._get_session()
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with session.head(self.url, timeout=timeout) as response:
+                return response.status == 200
         except Exception as e:
             logger.warning(f"URL недоступен: {e}")
             return False
     
-    def _make_request(self) -> Optional[requests.Response]:
+    async def _make_request(self) -> Optional[aiohttp.ClientResponse]:
         """
-        Выполняет HTTP запрос с повторными попытками.
+        Выполняет HTTP запрос с повторными попытками и exponential backoff.
         
         Returns:
-            Optional[requests.Response]: Ответ сервера или None при ошибке
+            Optional[ClientResponse]: Ответ сервера или None при ошибке
         """
-        # Проверяем доступность URL
-        if not self._check_url_availability():
-            logger.warning("URL недоступен, пропускаем проверку")
+        session = await self._get_session()
         
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                response = requests.get(
-                    self.url,
-                    headers=self.headers,
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
-                return response
-            except requests.exceptions.Timeout:
-                logger.warning(f"Таймаут запроса (попытка {attempt}/{self.retry_attempts})")
+                async with session.get(self.url) as response:
+                    # Проверяем статус код
+                    if response.status == 502 or response.status == 503:
+                        # Сервер временно недоступен, пробуем еще раз
+                        if attempt < self.retry_attempts:
+                            delay = await self._exponential_backoff(attempt)
+                            logger.warning(
+                                f"Сервер вернул {response.status} (попытка {attempt}/{self.retry_attempts}), "
+                                f"повтор через {delay:.2f}с"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                    
+                    response.raise_for_status()
+                    # Читаем контент и возвращаем его
+                    content = await response.read()
+                    # Создаем новый response-like объект для совместимости
+                    class ResponseWrapper:
+                        def __init__(self, content, status):
+                            self.content = content
+                            self.status = status
+                    
+                    return ResponseWrapper(content, response.status)
+                    
+            except aiohttp.ClientError as e:
+                logger.warning(f"Ошибка запроса (попытка {attempt}/{self.retry_attempts}): {e}")
                 if attempt < self.retry_attempts:
-                    sleep(self.retry_delay)
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Ошибка запроса (попытка {attempt}/{self.retry_attempts}): {e}")
+                    delay = await self._exponential_backoff(attempt)
+                    logger.info(f"Повтор через {delay:.2f}с")
+                    await asyncio.sleep(delay)
+            except Exception as e:
+                logger.error(f"Неожиданная ошибка запроса: {e}")
                 if attempt < self.retry_attempts:
-                    sleep(self.retry_delay)
+                    delay = await self._exponential_backoff(attempt)
+                    await asyncio.sleep(delay)
         
         return None
+    
+    def _parse_components(self, soup: BeautifulSoup, page_text: str) -> List[str]:
+        """
+        Парсит информацию о компонентах Bitrix24.
+        
+        Args:
+            soup: BeautifulSoup объект
+            page_text: Текст страницы
+            
+        Returns:
+            List[str]: Список компонентов с проблемами
+        """
+        components = []
+        
+        # Ищем упоминания компонентов
+        component_keywords = {
+            'CRM': ['CRM', 'crm', 'клиенты', 'сделки'],
+            'Почта': ['почта', 'email', 'mail', 'письма'],
+            'Задачи': ['задачи', 'tasks', 'task', 'проекты'],
+            'Диск': ['диск', 'disk', 'файлы', 'files'],
+            'Календарь': ['календарь', 'calendar', 'события'],
+            'Телефония': ['телефония', 'звонки', 'calls', 'видео']
+        }
+        
+        page_text_lower = page_text.lower()
+        
+        for component, keywords in component_keywords.items():
+            if any(keyword in page_text_lower for keyword in keywords):
+                # Проверяем, есть ли проблемы с этим компонентом
+                # Ищем контекст вокруг ключевых слов
+                for keyword in keywords:
+                    if keyword in page_text_lower:
+                        # Ищем индикаторы проблем рядом с ключевым словом
+                        idx = page_text_lower.find(keyword)
+                        context = page_text[max(0, idx-50):idx+50].lower()
+                        if any(word in context for word in ['сбой', 'проблем', 'ошибк', 'недоступен', 'down']):
+                            if component not in components:
+                                components.append(component)
+                            break
+        
+        return components
     
     def _parse_with_backup_selectors(self, soup: BeautifulSoup, page_text: str) -> Dict:
         """
@@ -97,6 +199,7 @@ class BitrixStatusParser:
             'timestamp': '',
             'description': '',
             'region': '',
+            'components': [],
             'error': False
         }
         
@@ -142,13 +245,16 @@ class BitrixStatusParser:
                 description = desc_match.group(1).strip()
                 description = re.sub(r'\s+', ' ', description)
                 status_info['description'] = description
+            
+            # Парсим компоненты
+            status_info['components'] = self._parse_components(soup, page_text)
         else:
             status_info['has_issues'] = False
             status_info['message'] = 'Все системы Битрикс24 работают нормально'
         
         return status_info
     
-    def parse_status(self) -> Dict:
+    async def parse_status(self) -> Dict:
         """
         Парсит страницу статуса Битрикс24 и возвращает информацию о текущем состоянии.
         Использует кэширование для уменьшения нагрузки на сервер.
@@ -160,6 +266,7 @@ class BitrixStatusParser:
                 - timestamp (str): Временная метка
                 - description (str): Описание проблемы
                 - region (str): Регион
+                - components (List[str]): Список затронутых компонентов
                 - error (bool): Была ли ошибка при парсинге
         """
         # Проверяем кэш
@@ -175,10 +282,11 @@ class BitrixStatusParser:
             'timestamp': '',
             'description': '',
             'region': '',
+            'components': [],
             'error': False
         }
         
-        response = self._make_request()
+        response = await self._make_request()
         if response is None:
             status_info['error'] = True
             status_info['message'] = 'Ошибка при получении данных с сервера статуса'
@@ -199,7 +307,7 @@ class BitrixStatusParser:
             logger.debug(f"Парсинг выполнен за {parse_duration:.2f}с")
             
             if status_info['has_issues']:
-                logger.info("Обнаружен сбой в работе Bitrix24")
+                logger.info(f"Обнаружен сбой в работе Bitrix24. Компоненты: {status_info.get('components', [])}")
             else:
                 logger.debug("Статус Bitrix24 в норме")
             
@@ -210,4 +318,3 @@ class BitrixStatusParser:
             status_info['error'] = True
             status_info['message'] = f'Неожиданная ошибка при парсинге: {str(e)}'
             return status_info
-

@@ -43,8 +43,22 @@ def create_status_button() -> InlineKeyboardMarkup:
         InlineKeyboardMarkup: Разметка с кнопкой
     """
     markup = InlineKeyboardMarkup()
-    button = InlineKeyboardButton("🔄 Проверить статус", callback_data="check_status")
+    button = InlineKeyboardButton("🔄 Проверить статус сейчас", callback_data="check_status")
     markup.add(button)
+    return markup
+
+def create_alert_buttons() -> InlineKeyboardMarkup:
+    """
+    Создает кнопки для сообщений об алертах.
+    
+    Returns:
+        InlineKeyboardMarkup: Разметка с кнопками
+    """
+    markup = InlineKeyboardMarkup()
+    button1 = InlineKeyboardButton("🔄 Проверить статус сейчас", callback_data="check_status")
+    button2 = InlineKeyboardButton("📊 История инцидентов", callback_data="show_incidents")
+    markup.row(button1)
+    markup.row(button2)
     return markup
 
 
@@ -77,6 +91,10 @@ def format_status_message(
 
         if status_info.get('region'):
             msg += f"🌍 *Регион:* `{status_info['region']}`\n"
+        
+        if status_info.get('components'):
+            components_str = ', '.join(status_info['components'])
+            msg += f"🔧 *Затронутые компоненты:* `{components_str}`\n"
 
         if start_time:
             msg += f"⏰ *Сбой с:* `{start_time.strftime('%H:%M:%S')}` \\(МСК\\)\n"

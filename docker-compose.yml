@@ -16,7 +16,6 @@ services:
       - ./logs:/app/logs
     environment:
       # Переопределяем пути для работы с volumes
-      - SUBSCRIBERS_FILE=/app/data/subscribers.json
       - LOG_FILE=/app/logs/bot.log
     healthcheck:
       test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]

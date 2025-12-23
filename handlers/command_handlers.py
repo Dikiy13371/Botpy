@@ -117,11 +117,21 @@ class CommandHandlers:
         def callback_status(call: CallbackQuery):
             """Обработчик callback для кнопки проверки статуса"""
             self.handle_callback_status(call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data == "show_incidents")
+        def callback_incidents(call: CallbackQuery):
+            """Обработчик callback для кнопки показа инцидентов"""
+            self.handle_callback_incidents(call)
+        
+        @self.bot.message_handler(commands=['history'])
+        def show_history(message: Message):
+            """Обработчик команды /history"""
+            self.handle_history(message)
     
-    def handle_start(self, message: Message) -> None:
-        """Обработчик команды /start"""
+    async def handle_start_async(self, message: Message) -> None:
+        """Обработчик команды /start (async)"""
         chat_id = message.chat.id
-        self.subscriber_manager.add_subscriber(chat_id)
+        await self.subscriber_manager.add_subscriber(chat_id)
         
         welcome_text = (
             "👋 *Привет\\!* Я бот для мониторинга статуса Битрикс24\\.\n\n"
@@ -133,6 +143,7 @@ class CommandHandlers:
             "• `/stats` \\- Статистика бота\n"
             "• `/metrics` \\- Подробные метрики\n"
             "• `/incidents` \\- История инцидентов\n"
+            "• `/history` \\- Последние 5 инцидентов\n"
             "• `/health` \\- Статус здоровья бота\n"
             "• `/export` \\- Экспорт данных в CSV\n"
             "• `/help` \\- Показать это сообщение\n\n"
@@ -148,14 +159,30 @@ class CommandHandlers:
         except Exception as e:
             logger.error(f"Ошибка отправки приветственного сообщения: {e}")
     
+    def handle_start(self, message: Message) -> None:
+        """Обработчик команды /start (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_start_async(message))
+        except RuntimeError:
+            # Если уже есть event loop, создаем новый
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_start_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_start: {e}", exc_info=True)
+    
     def handle_help(self, message: Message) -> None:
         """Обработчик команды /help"""
         self.handle_start(message)
     
-    def handle_subscribe(self, message: Message) -> None:
-        """Обработчик команды /subscribe"""
+    async def handle_subscribe_async(self, message: Message) -> None:
+        """Обработчик команды /subscribe (async)"""
         chat_id = message.chat.id
-        was_new = self.subscriber_manager.add_subscriber(chat_id)
+        was_new = await self.subscriber_manager.add_subscriber(chat_id)
         
         if was_new:
             response = "✅ Вы подписаны на уведомления о статусе Битрикс24\\!"
@@ -167,10 +194,25 @@ class CommandHandlers:
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения подписки: {e}")
     
-    def handle_unsubscribe(self, message: Message) -> None:
-        """Обработчик команды /unsubscribe"""
+    def handle_subscribe(self, message: Message) -> None:
+        """Обработчик команды /subscribe (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_subscribe_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_subscribe_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_subscribe: {e}", exc_info=True)
+    
+    async def handle_unsubscribe_async(self, message: Message) -> None:
+        """Обработчик команды /unsubscribe (async)"""
         chat_id = message.chat.id
-        if self.subscriber_manager.remove_subscriber(chat_id):
+        if await self.subscriber_manager.remove_subscriber(chat_id):
             response = "❌ Вы отписались от уведомлений\\."
         else:
             response = "ℹ️ Вы не были подписаны на уведомления\\."
@@ -180,12 +222,28 @@ class CommandHandlers:
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения отписки: {e}")
     
-    def handle_stats(self, message: Message) -> None:
-        """Обработчик команды /stats"""
+    def handle_unsubscribe(self, message: Message) -> None:
+        """Обработчик команды /unsubscribe (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_unsubscribe_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_unsubscribe_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_unsubscribe: {e}", exc_info=True)
+    
+    async def handle_stats_async(self, message: Message) -> None:
+        """Обработчик команды /stats (async)"""
         escaped_url = escape_url(self.config.URL)
+        subscriber_count = await self.subscriber_manager.get_count()
         stats_text = (
             f"📊 *Статистика бота*\n\n"
-            f"👥 Подписчиков: `{self.subscriber_manager.get_count()}`\n"
+            f"👥 Подписчиков: `{subscriber_count}`\n"
             f"⏰ Интервал проверки: `{self.config.CHECK_INTERVAL}` сек\n"
             f"🌐 Мониторинг: [status\\.bitrix24\\.ru]({escaped_url})"
         )
@@ -194,12 +252,27 @@ class CommandHandlers:
         except Exception as e:
             logger.error(f"Ошибка отправки статистики: {e}")
     
-    def handle_status(self, message: Message) -> None:
-        """Обработчик команды /status"""
+    def handle_stats(self, message: Message) -> None:
+        """Обработчик команды /stats (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_stats_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_stats_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_stats: {e}", exc_info=True)
+    
+    async def handle_status_async(self, message: Message) -> None:
+        """Обработчик команды /status (async)"""
         try:
             self.bot.reply_to(message, "🔍 Проверяю статус Битрикс24\\.\\.\\.", parse_mode='MarkdownV2')
             
-            status_info = self.parser.parse_status()
+            status_info = await self.parser.parse_status()
             status_message = format_status_message(status_info, self.config.URL)
             
             self.bot.send_message(
@@ -215,42 +288,108 @@ class CommandHandlers:
             except:
                 pass
     
+    def handle_status(self, message: Message) -> None:
+        """Обработчик команды /status (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_status_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_status_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_status: {e}", exc_info=True)
+    
     def handle_getid(self, message: Message) -> None:
         """Обработчик команды /getid"""
         chat_id = message.chat.id
         chat_type = message.chat.type
         chat_title = getattr(message.chat, 'title', 'Личный чат')
         
+        # Проверяем, является ли это супергруппой
+        is_supergroup = chat_type == 'supergroup'
+        note = ""
+        if is_supergroup:
+            note = "\n\n⚠️ *Важно:* Это супергруппа\\. Если группа была преобразована из обычной группы, используйте этот новый ID\\."
+        
         response = (
             f"📊 *Информация о чата:*\n\n"
             f"🆔 *ID:* `{chat_id}`\n"
             f"📝 *Тип:* `{chat_type}`\n"
-            f"🏷️ *Название:* `{chat_title}`\n\n"
-            f"💡 *Скопируйте ID и вставьте в конфигурацию*"
+            f"🏷️ *Название:* `{chat_title}`\n"
+            f"{note}\n"
+            f"💡 *Скопируйте ID и вставьте в GROUP_ID в файле \\.env*"
         )
         
         try:
             self.bot.reply_to(message, response, parse_mode='MarkdownV2')
-            logger.info(f"Запрос ID: {chat_id} ({chat_title})")
+            logger.info(f"Запрос ID: {chat_id} ({chat_title}, тип: {chat_type})")
         except Exception as e:
             logger.error(f"Ошибка отправки ID: {e}")
     
-    def handle_callback_status(self, call: CallbackQuery) -> None:
-        """Обработчик callback для кнопки проверки статуса"""
+    async def handle_callback_status_async(self, call: CallbackQuery) -> None:
+        """Обработчик callback для кнопки проверки статуса (async)"""
         try:
             self.bot.answer_callback_query(call.id, "🔍 Проверяю статус Битрикс24...")
-            status_info = self.parser.parse_status()
+            status_info = await self.parser.parse_status()
             status_message = format_status_message(status_info, self.config.URL)
             self.bot.send_message(
                 call.message.chat.id,
                 status_message,
-                parse_mode='MarkdownV2'
+                parse_mode='MarkdownV2',
+                reply_markup=create_status_button()
             )
         except Exception as e:
             logger.error(f"Ошибка обработки callback статуса: {e}")
     
-    def handle_metrics(self, message: Message) -> None:
-        """Обработчик команды /metrics"""
+    def handle_callback_status(self, call: CallbackQuery) -> None:
+        """Обработчик callback для кнопки проверки статуса (синхронная обертка)"""
+        import asyncio
+        # pyTelegramBotAPI работает в worker threads без event loop
+        # Создаем новый event loop для каждого вызова
+        try:
+            asyncio.run(self.handle_callback_status_async(call))
+        except RuntimeError as e:
+            # Если уже есть event loop (маловероятно в worker thread)
+            logger.warning(f"Event loop уже существует: {e}, используем новый")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_callback_status_async(call))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_callback_status: {e}", exc_info=True)
+    
+    async def handle_callback_incidents_async(self, call: CallbackQuery) -> None:
+        """Обработчик callback для кнопки показа инцидентов (async)"""
+        try:
+            self.bot.answer_callback_query(call.id, "📊 Загружаю историю инцидентов...")
+            await self.handle_incidents_async(call.message)
+        except Exception as e:
+            logger.error(f"Ошибка обработки callback инцидентов: {e}")
+    
+    def handle_callback_incidents(self, call: CallbackQuery) -> None:
+        """Обработчик callback для кнопки показа инцидентов (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_callback_incidents_async(call))
+        except RuntimeError as e:
+            logger.warning(f"Event loop уже существует: {e}, используем новый")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_callback_incidents_async(call))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_callback_incidents: {e}", exc_info=True)
+    
+    async def handle_metrics_async(self, message: Message) -> None:
+        """Обработчик команды /metrics (async)"""
         try:
             metrics = self.metrics_collector.get_metrics()
             uptime = self.metrics_collector.get_uptime_formatted()
@@ -264,6 +403,7 @@ class CommandHandlers:
                     pass
             
             avg_parse = f"{metrics.get('average_parse_time', 0):.2f}" if metrics.get('average_parse_time') else "N/A"
+            subscriber_count = await self.subscriber_manager.get_count()
             
             metrics_text = (
                 f"📊 *Подробные метрики бота*\n\n"
@@ -276,7 +416,7 @@ class CommandHandlers:
                 f"⏰ *Последняя проверка:* `{last_check}`\n"
                 f"⚡ *Среднее время парсинга:* `{avg_parse}` сек\n"
                 f"⚠️ *Ошибок за час:* `{metrics.get('errors_last_hour', 0)}`\n"
-                f"👥 *Подписчиков:* `{self.subscriber_manager.get_count()}`"
+                f"👥 *Подписчиков:* `{subscriber_count}`"
             )
             
             self.bot.reply_to(message, metrics_text, parse_mode='MarkdownV2')
@@ -287,42 +427,78 @@ class CommandHandlers:
             except:
                 pass
     
-    def handle_incidents(self, message: Message) -> None:
-        """Обработчик команды /incidents"""
+    def handle_metrics(self, message: Message) -> None:
+        """Обработчик команды /metrics (синхронная обертка)"""
+        import asyncio
         try:
-            recent = self.incident_tracker.get_recent_incidents(10)
-            active = self.incident_tracker.get_active_incident()
+            asyncio.run(self.handle_metrics_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_metrics_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_metrics: {e}", exc_info=True)
+    
+    async def handle_incidents_async(self, message: Message) -> None:
+        """Обработчик команды /incidents (async)"""
+        try:
+            # Получаем активный инцидент и последние завершенные
+            active = await self.incident_tracker.get_active_incident()
+            recent = await self.incident_tracker.get_recent_incidents(limit=5)
             
-            if not recent and not active:
-                self.bot.reply_to(message, "📋 *История инцидентов*\n\nНет зарегистрированных инцидентов\\.", parse_mode='MarkdownV2')
+            if not active and not recent:
+                self.bot.reply_to(
+                    message,
+                    "📋 *История инцидентов*\n\nНет зарегистрированных инцидентов\\.",
+                    parse_mode='MarkdownV2'
+                )
                 return
             
             incidents_text = "📋 *Последние инциденты:*\n\n"
             
+            # Показываем активный инцидент первым
             if active:
                 start_dt = datetime.fromisoformat(active['start_time'])
+                start_str = start_dt.strftime('%d.%m.%Y %H:%M:%S').replace('.', '\\.')
+                
                 incidents_text += (
                     f"🔴 *АКТИВНЫЙ ИНЦИДЕНТ*\n"
-                    f"⏰ Начало: `{start_dt.strftime('%d.%m.%Y %H:%M:%S')}`\n"
+                    f"⏰ Начало: `{start_str}`\n"
                 )
                 if active.get('region'):
                     incidents_text += f"🌍 Регион: `{active['region']}`\n"
-                if active.get('description'):
-                    desc = active['description'][:100] + "..." if len(active['description']) > 100 else active['description']
-                    incidents_text += f"📝 Описание: `{desc}`\n"
+                if active.get('components'):
+                    components = active['components']
+                    if isinstance(components, str):
+                        components_str = components
+                    else:
+                        components_str = ', '.join(components) if isinstance(components, list) else str(components)
+                    if components_str:
+                        incidents_text += f"🔧 Компоненты: `{components_str}`\n"
                 incidents_text += "\n"
             
-            for incident in reversed(recent[-5:]):  # Последние 5
+            # Показываем последние завершенные инциденты
+            for incident in recent[-5:]:  # Последние 5
+                if incident.get('status') == 'active':
+                    continue  # Пропускаем активный, он уже показан выше
+                
                 start_dt = datetime.fromisoformat(incident['start_time'])
                 end_dt = datetime.fromisoformat(incident['end_time']) if incident.get('end_time') else None
                 
-                incidents_text += f"• `{start_dt.strftime('%d.%m %H:%M')}`"
+                start_str = start_dt.strftime('%d.%m %H:%M').replace('.', '\\.')
+                incidents_text += f"• `{start_str}`"
                 if end_dt:
-                    incidents_text += f" \\- `{end_dt.strftime('%H:%M')}`"
-                    incidents_text += f" \\(`{incident.get('duration', 'N/A')}`\\)"
+                    end_str = end_dt.strftime('%H:%M').replace('.', '\\.')
+                    incidents_text += f" \\- `{end_str}`"
+                    if incident.get('duration'):
+                        incidents_text += f" \\(`{incident['duration']}`\\)"
                 incidents_text += "\n"
             
-            incidents_text += f"\n📊 Всего инцидентов: `{self.incident_tracker.get_incidents_count()}`"
+            total_count = await self.incident_tracker.get_incidents_count()
+            incidents_text += f"\n📊 Всего инцидентов: `{total_count}`"
             
             self.bot.reply_to(message, incidents_text, parse_mode='MarkdownV2')
         except Exception as e:
@@ -331,6 +507,21 @@ class CommandHandlers:
                 self.bot.reply_to(message, "❌ Ошибка при получении инцидентов\\.", parse_mode='MarkdownV2')
             except:
                 pass
+    
+    def handle_incidents(self, message: Message) -> None:
+        """Обработчик команды /incidents (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_incidents_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_incidents_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_incidents: {e}", exc_info=True)
     
     def handle_health(self, message: Message) -> None:
         """Обработчик команды /health"""
@@ -363,10 +554,79 @@ class CommandHandlers:
             except:
                 pass
     
-    def handle_export(self, message: Message) -> None:
-        """Обработчик команды /export"""
+    async def handle_history_async(self, message: Message) -> None:
+        """Обработчик команды /history (async)"""
         try:
-            csv_data = self.incident_tracker.export_to_csv_format()
+            incidents = await self.incident_tracker.get_history(limit=5)
+            
+            if not incidents:
+                self.bot.reply_to(
+                    message, 
+                    "📋 *История инцидентов*\n\nНет завершенных инцидентов в базе данных\\.", 
+                    parse_mode='MarkdownV2'
+                )
+                return
+            
+            history_text = "📋 *Последние 5 инцидентов:*\n\n"
+            
+            for incident in incidents:
+                start_dt = datetime.fromisoformat(incident['start_time'])
+                end_dt = datetime.fromisoformat(incident['end_time']) if incident.get('end_time') else None
+                
+                # Форматируем даты отдельно, чтобы избежать проблем с обратными слешами в f-string
+                start_str = start_dt.strftime('%d.%m.%Y %H:%M:%S').replace('.', '\\.')
+                end_str = end_dt.strftime('%d.%m.%Y %H:%M:%S').replace('.', '\\.') if end_dt else None
+                
+                history_text += f"🔴 *Инцидент \\#{incident['id']}*\n"
+                history_text += f"⏰ Начало: `{start_str}`\n"
+                
+                if end_dt and end_str:
+                    history_text += f"✅ Конец: `{end_str}`\n"
+                    history_text += f"⏱️ Длительность: `{incident.get('duration', 'N/A')}`\n"
+                
+                if incident.get('region'):
+                    history_text += f"🌍 Регион: `{incident['region']}`\n"
+                
+                if incident.get('components'):
+                    components = incident['components']
+                    if isinstance(components, str):
+                        # Если это строка с запятыми, просто используем её
+                        components_str = components
+                    else:
+                        # Если это список, объединяем
+                        components_str = ', '.join(components) if isinstance(components, list) else str(components)
+                    if components_str:
+                        history_text += f"🔧 Компоненты: `{components_str}`\n"
+                
+                history_text += "\n"
+            
+            self.bot.reply_to(message, history_text, parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.error(f"Ошибка отправки истории: {e}")
+            try:
+                self.bot.reply_to(message, "❌ Ошибка при получении истории\\.", parse_mode='MarkdownV2')
+            except:
+                pass
+    
+    def handle_history(self, message: Message) -> None:
+        """Обработчик команды /history (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_history_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_history_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_history: {e}", exc_info=True)
+    
+    async def handle_export_async(self, message: Message) -> None:
+        """Обработчик команды /export (async)"""
+        try:
+            csv_data = await self.incident_tracker.export_to_csv_format()
             
             if not csv_data or csv_data == "Дата,Время начала,Время конца,Длительность,Регион,Описание":
                 self.bot.reply_to(message, "📊 *Экспорт данных*\n\nНет данных для экспорта\\.", parse_mode='MarkdownV2')
@@ -387,6 +647,21 @@ class CommandHandlers:
                 self.bot.reply_to(message, "❌ Ошибка при экспорте данных\\.", parse_mode='MarkdownV2')
             except:
                 pass
+    
+    def handle_export(self, message: Message) -> None:
+        """Обработчик команды /export (синхронная обертка)"""
+        import asyncio
+        try:
+            asyncio.run(self.handle_export_async(message))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.handle_export_async(message))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в handle_export: {e}", exc_info=True)
     
     def handle_monitoring(self, message: Message) -> None:
         """Обработчик команды /monitoring (переключение мониторинга)"""

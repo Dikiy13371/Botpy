@@ -5,7 +5,9 @@ import sys
 import logging
 import telebot
 
+import asyncio
 from config.config import BotConfig
+from services.database import Database
 from services.bitrix_parser import BitrixStatusParser
 from services.subscriber_manager import SubscriberManager
 from services.metrics_collector import MetricsCollector
@@ -36,6 +38,9 @@ class Bitrix24MonitorBot:
         
         logger.info(f"Конфигурация загружена: {self.config}")
         
+        # Инициализируем базу данных
+        self.database = Database('data/bot.db')
+        
         # Инициализируем компоненты
         self.bot = telebot.TeleBot(self.config.BOT_TOKEN)
         self.parser = BitrixStatusParser(
@@ -45,9 +50,9 @@ class Bitrix24MonitorBot:
             retry_delay=self.config.RETRY_DELAY,
             cache_ttl=self.config.CACHE_TTL
         )
-        self.subscriber_manager = SubscriberManager(self.config.SUBSCRIBERS_FILE)
+        self.subscriber_manager = SubscriberManager(self.database)
         self.metrics_collector = MetricsCollector('data/metrics.json')
-        self.incident_tracker = IncidentTracker('data/incidents.json')
+        self.incident_tracker = IncidentTracker(self.database)
         self.status_monitor = StatusMonitor(
             bot=self.bot,
             parser=self.parser,
@@ -76,12 +81,32 @@ class Bitrix24MonitorBot:
         self.stop()
         sys.exit(0)
     
+    async def _init_async(self) -> None:
+        """Асинхронная инициализация компонентов."""
+        await self.database.connect()
+        await self.subscriber_manager.load_subscribers()
+        # Восстанавливаем активный инцидент из БД
+        await self.incident_tracker.restore_active_incident()
+        logger.info("Асинхронные компоненты инициализированы")
+    
     def start(self) -> None:
         """Запускает бота и мониторинг."""
+        # Инициализируем async компоненты
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        loop.run_until_complete(self._init_async())
+        
         logger.info("🤖 Бот запущен!")
         logger.info(f"⏰ Интервал проверки: {self.config.CHECK_INTERVAL} секунд")
         logger.info(f"📡 Мониторинг: {self.config.URL}")
-        logger.info(f"✅ Ожидание команд... (Подписчиков: {self.subscriber_manager.get_count()})")
+        
+        # Получаем количество подписчиков
+        subscriber_count = loop.run_until_complete(self.subscriber_manager.get_count())
+        logger.info(f"✅ Ожидание команд... (Подписчиков: {subscriber_count})")
         
         # Запускаем мониторинг
         self.status_monitor.start()
@@ -97,10 +122,27 @@ class Bitrix24MonitorBot:
             self.stop()
             sys.exit(1)
     
+    async def _stop_async(self) -> None:
+        """Асинхронная остановка компонентов."""
+        await self.status_monitor.stop_async()
+        await self.parser.close()
+        await self.database.close()
+    
     def stop(self) -> None:
         """Останавливает бота и мониторинг."""
         logger.info("Остановка бота...")
         self.status_monitor.stop()
+        
+        # Закрываем async компоненты
+        try:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._stop_async())
+        except RuntimeError:
+            # Если event loop не запущен, создаем новый
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._stop_async())
+        
         logger.info("Бот остановлен")
 
 

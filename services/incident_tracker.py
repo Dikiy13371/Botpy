@@ -1,111 +1,113 @@
-"""Отслеживание истории инцидентов."""
+"""Отслеживание истории инцидентов с использованием SQLite."""
 
-import json
-import os
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from utils.time_utils import get_msk_time, format_duration
+from services.database import Database
 
 logger = logging.getLogger(__name__)
 
 
 class IncidentTracker:
-    """Класс для отслеживания истории инцидентов."""
+    """Класс для отслеживания истории инцидентов с использованием SQLite."""
     
-    def __init__(self, incidents_file: str = 'data/incidents.json'):
+    def __init__(self, database: Database):
         """
         Инициализирует трекер инцидентов.
         
         Args:
-            incidents_file: Путь к файлу с инцидентами
+            database: Экземпляр базы данных
         """
-        self.incidents_file = incidents_file
-        self.incidents: List[Dict] = []
-        self.current_incident: Optional[Dict] = None
-        
-        # Создаем директорию если нужно
-        incidents_dir = os.path.dirname(self.incidents_file)
-        if incidents_dir and not os.path.exists(incidents_dir):
-            os.makedirs(incidents_dir, exist_ok=True)
-        
-        self.load_incidents()
+        self.db = database
+        self.current_incident_id: Optional[int] = None
     
-    def load_incidents(self) -> None:
-        """Загружает историю инцидентов из файла."""
-        if os.path.exists(self.incidents_file):
-            try:
-                with open(self.incidents_file, 'r', encoding='utf-8') as f:
-                    self.incidents = json.load(f)
-                logger.info(f"Загружено {len(self.incidents)} инцидентов из истории")
-            except Exception as e:
-                logger.error(f"Ошибка загрузки инцидентов: {e}")
-                self.incidents = []
-        else:
-            self.incidents = []
-    
-    def save_incidents(self) -> None:
-        """Сохраняет историю инцидентов в файл."""
-        try:
-            with open(self.incidents_file, 'w', encoding='utf-8') as f:
-                json.dump(self.incidents, f, ensure_ascii=False, indent=2)
-            logger.debug("Инциденты сохранены")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения инцидентов: {e}")
-    
-    def start_incident(self, description: str = '', region: str = '') -> None:
+    async def start_incident(
+        self, 
+        description: str = '', 
+        region: str = '',
+        components: Optional[List[str]] = None
+    ) -> Optional[int]:
         """
         Начинает новый инцидент.
         
         Args:
             description: Описание проблемы
             region: Регион где произошел инцидент
+            components: Список затронутых компонентов
+            
+        Returns:
+            Optional[int]: ID созданного инцидента
         """
-        if self.current_incident is None:
-            self.current_incident = {
-                'start_time': get_msk_time().isoformat(),
-                'end_time': None,
-                'duration': None,
-                'description': description,
-                'region': region,
-                'status': 'active'
-            }
-            logger.info("Начат новый инцидент")
+        if self.current_incident_id is None:
+            try:
+                components_str = ','.join(components) if components else None
+                start_time = get_msk_time().isoformat()
+                
+                cursor = await self.db.execute(
+                    '''INSERT INTO incidents 
+                       (start_time, description, region, status, components) 
+                       VALUES (?, ?, ?, 'active', ?)''',
+                    (start_time, description, region, components_str)
+                )
+                await self.db.commit()
+                
+                self.current_incident_id = cursor.lastrowid
+                logger.info(f"Начат новый инцидент (ID: {self.current_incident_id})")
+                return self.current_incident_id
+            except Exception as e:
+                logger.error(f"Ошибка создания инцидента: {e}")
+                return None
+        return self.current_incident_id
     
-    def end_incident(self) -> Optional[Dict]:
+    async def end_incident(self) -> Optional[Dict]:
         """
         Завершает текущий инцидент.
         
         Returns:
             Optional[Dict]: Завершенный инцидент или None
         """
-        if self.current_incident:
-            end_time = get_msk_time()
-            start_time = datetime.fromisoformat(self.current_incident['start_time'])
-            duration = format_duration(start_time)
-            
-            self.current_incident['end_time'] = end_time.isoformat()
-            self.current_incident['duration'] = duration
-            self.current_incident['status'] = 'resolved'
-            
-            incident = self.current_incident.copy()
-            self.incidents.append(incident)
-            
-            # Оставляем только последние 1000 инцидентов
-            if len(self.incidents) > 1000:
-                self.incidents = self.incidents[-1000:]
-            
-            self.current_incident = None
-            self.save_incidents()
-            
-            logger.info(f"Инцидент завершен, длительность: {duration}")
-            return incident
+        if self.current_incident_id:
+            try:
+                # Получаем данные инцидента
+                incident = await self.db.fetchone(
+                    'SELECT * FROM incidents WHERE id = ?',
+                    (self.current_incident_id,)
+                )
+                
+                if incident:
+                    end_time = get_msk_time()
+                    start_time = datetime.fromisoformat(incident['start_time'])
+                    duration = format_duration(start_time)
+                    
+                    # Обновляем инцидент
+                    await self.db.execute(
+                        '''UPDATE incidents 
+                           SET end_time = ?, duration = ?, status = 'resolved' 
+                           WHERE id = ?''',
+                        (end_time.isoformat(), duration, self.current_incident_id)
+                    )
+                    await self.db.commit()
+                    
+                    # Получаем обновленные данные
+                    updated_incident = await self.db.fetchone(
+                        'SELECT * FROM incidents WHERE id = ?',
+                        (self.current_incident_id,)
+                    )
+                    
+                    self.current_incident_id = None
+                    
+                    if updated_incident:
+                        logger.info(f"Инцидент завершен (ID: {updated_incident['id']}), длительность: {duration}")
+                        return dict(updated_incident)
+            except Exception as e:
+                logger.error(f"Ошибка завершения инцидента: {e}")
         
         return None
     
-    def get_recent_incidents(self, limit: int = 10) -> List[Dict]:
+    async def get_recent_incidents(self, limit: int = 10) -> List[Dict]:
         """
-        Возвращает последние инциденты.
+        Возвращает последние инциденты (включая активные и завершенные).
         
         Args:
             limit: Количество инцидентов для возврата
@@ -113,53 +115,142 @@ class IncidentTracker:
         Returns:
             List[Dict]: Список последних инцидентов
         """
-        return self.incidents[-limit:] if len(self.incidents) > limit else self.incidents
+        try:
+            rows = await self.db.fetchall(
+                '''SELECT * FROM incidents 
+                   ORDER BY start_time DESC 
+                   LIMIT ?''',
+                (limit,)
+            )
+            # Преобразуем components из строки в список для удобства
+            for row in rows:
+                if row.get('components') and isinstance(row['components'], str):
+                    row['components'] = row['components'].split(',') if row['components'] else []
+            return rows
+        except Exception as e:
+            logger.error(f"Ошибка получения инцидентов: {e}")
+            return []
     
-    def get_active_incident(self) -> Optional[Dict]:
+    async def restore_active_incident(self) -> None:
+        """
+        Восстанавливает активный инцидент из БД при запуске бота.
+        """
+        try:
+            active = await self.get_active_incident()
+            if active:
+                self.current_incident_id = active['id']
+                logger.info(f"Восстановлен активный инцидент (ID: {self.current_incident_id})")
+        except Exception as e:
+            logger.error(f"Ошибка восстановления активного инцидента: {e}")
+    
+    async def get_active_incident(self) -> Optional[Dict]:
         """
         Возвращает текущий активный инцидент.
+        Проверяет БД на наличие активных инцидентов, даже если current_incident_id не установлен.
         
         Returns:
             Optional[Dict]: Активный инцидент или None
         """
-        return self.current_incident
+        try:
+            # Сначала проверяем по current_incident_id, если он установлен
+            if self.current_incident_id:
+                incident = await self.db.fetchone(
+                    'SELECT * FROM incidents WHERE id = ? AND status = ?',
+                    (self.current_incident_id, 'active')
+                )
+                if incident:
+                    return dict(incident)
+            
+            # Если current_incident_id не установлен или инцидент не найден,
+            # ищем активный инцидент в БД
+            incident = await self.db.fetchone(
+                'SELECT * FROM incidents WHERE status = ? ORDER BY start_time DESC LIMIT 1',
+                ('active',)
+            )
+            
+            if incident:
+                # Восстанавливаем current_incident_id
+                self.current_incident_id = incident['id']
+                return dict(incident)
+            
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения активного инцидента: {e}")
+            return None
     
-    def get_incidents_count(self) -> int:
+    async def get_incidents_count(self) -> int:
         """
         Возвращает общее количество инцидентов.
         
         Returns:
             int: Количество инцидентов
         """
-        return len(self.incidents)
+        try:
+            result = await self.db.fetchone('SELECT COUNT(*) as count FROM incidents')
+            return result['count'] if result else 0
+        except Exception as e:
+            logger.error(f"Ошибка получения количества инцидентов: {e}")
+            return 0
     
-    def export_to_csv_format(self) -> str:
+    async def get_history(self, limit: int = 5) -> List[Dict]:
+        """
+        Возвращает историю инцидентов для команды /history.
+        
+        Args:
+            limit: Количество инцидентов для возврата
+            
+        Returns:
+            List[Dict]: Список инцидентов с форматированными данными
+        """
+        try:
+            rows = await self.db.fetchall(
+                '''SELECT * FROM incidents 
+                   WHERE status = 'resolved'
+                   ORDER BY start_time DESC 
+                   LIMIT ?''',
+                (limit,)
+            )
+            return rows
+        except Exception as e:
+            logger.error(f"Ошибка получения истории: {e}")
+            return []
+    
+    async def export_to_csv_format(self) -> str:
         """
         Экспортирует инциденты в CSV формат.
         
         Returns:
             str: CSV строка с инцидентами
         """
-        csv_lines = ['Дата,Время начала,Время конца,Длительность,Регион,Описание']
-        
-        for incident in self.incidents:
-            start_dt = datetime.fromisoformat(incident['start_time'])
-            start_date = start_dt.strftime('%Y-%m-%d')
-            start_time = start_dt.strftime('%H:%M:%S')
+        try:
+            csv_lines = ['Дата,Время начала,Время конца,Длительность,Регион,Компоненты,Описание']
             
-            if incident.get('end_time'):
-                end_dt = datetime.fromisoformat(incident['end_time'])
-                end_time = end_dt.strftime('%H:%M:%S')
-            else:
-                end_time = 'В процессе'
-            
-            duration = incident.get('duration', 'N/A')
-            region = incident.get('region', 'N/A')
-            description = incident.get('description', '').replace(',', ';').replace('\n', ' ')
-            
-            csv_lines.append(
-                f"{start_date},{start_time},{end_time},{duration},{region},\"{description}\""
+            rows = await self.db.fetchall(
+                '''SELECT * FROM incidents 
+                   ORDER BY start_time DESC'''
             )
-        
-        return '\n'.join(csv_lines)
-
+            
+            for incident in rows:
+                start_dt = datetime.fromisoformat(incident['start_time'])
+                start_date = start_dt.strftime('%Y-%m-%d')
+                start_time = start_dt.strftime('%H:%M:%S')
+                
+                if incident.get('end_time'):
+                    end_dt = datetime.fromisoformat(incident['end_time'])
+                    end_time = end_dt.strftime('%H:%M:%S')
+                else:
+                    end_time = 'В процессе'
+                
+                duration = incident.get('duration', 'N/A')
+                region = incident.get('region', 'N/A')
+                components = incident.get('components', 'N/A')
+                description = (incident.get('description', '') or '').replace(',', ';').replace('\n', ' ')
+                
+                csv_lines.append(
+                    f"{start_date},{start_time},{end_time},{duration},{region},{components},\"{description}\""
+                )
+            
+            return '\n'.join(csv_lines)
+        except Exception as e:
+            logger.error(f"Ошибка экспорта в CSV: {e}")
+            return "Дата,Время начала,Время конца,Длительность,Регион,Компоненты,Описание"

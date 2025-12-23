@@ -1,7 +1,6 @@
 """Мониторинг статуса Bitrix24."""
 
-import time
-import threading
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Dict
@@ -12,7 +11,7 @@ from services.subscriber_manager import SubscriberManager
 from services.metrics_collector import MetricsCollector
 from services.incident_tracker import IncidentTracker
 from utils.time_utils import get_msk_time, format_duration
-from utils.message_formatter import format_status_message, create_status_button
+from utils.message_formatter import format_status_message, create_status_button, create_alert_buttons
 from time import time as current_time
 
 logger = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ class StatusMonitor:
         self.previous_status: Optional[Dict] = None
         self.alert_message_ids: Dict[int, Optional[int]] = {}  # {group_id: message_id}
         self.issue_start_time: Optional[datetime] = None
-        self.monitor_thread: Optional[threading.Thread] = None
+        self.monitor_task: Optional[asyncio.Task] = None
         self.is_running = False
         self.monitoring_enabled = True
         
@@ -59,7 +58,7 @@ class StatusMonitor:
         self.consecutive_errors = 0
         self.last_successful_check: Optional[datetime] = None
     
-    def _send_or_edit_group_message(self, group_id: int, message_id: Optional[int] = None, message: str = "") -> Optional[int]:
+    def _send_or_edit_group_message(self, group_id: int, message_id: Optional[int] = None, message: str = "", is_new: bool = False) -> Optional[int]:
         """
         Отправляет новое сообщение или редактирует существующее в группе.
         
@@ -72,27 +71,54 @@ class StatusMonitor:
             Optional[int]: ID отправленного/отредактированного сообщения или None при ошибке
         """
         try:
-            if message_id is None:
+            # Если is_new=True, всегда отправляем новое сообщение, даже если message_id передан
+            if message_id is None or is_new:
+                # Используем create_alert_buttons для алертов, create_status_button для обычных сообщений
+                is_alert = "АЛЕРТ" in message or "СБОЙ" in message
+                markup = create_alert_buttons() if is_alert else create_status_button()
+                
                 sent = self.bot.send_message(
                     group_id,
                     message,
                     parse_mode='MarkdownV2',
-                    reply_markup=create_status_button()
+                    reply_markup=markup
                 )
                 logger.info(f"📢 Сообщение с кнопкой отправлено в группу {group_id}")
                 return sent.message_id
             else:
+                # Используем create_alert_buttons для алертов
+                is_alert = "АЛЕРТ" in message or "СБОЙ" in message or "ВОССТАНОВЛЕН" in message
+                markup = create_alert_buttons() if is_alert else create_status_button()
+                
                 self.bot.edit_message_text(
                     chat_id=group_id,
                     message_id=message_id,
                     text=message,
                     parse_mode='MarkdownV2',
-                    reply_markup=create_status_button()
+                    reply_markup=markup
                 )
                 logger.info(f"🔄 Сообщение в группе {group_id} обновлено")
                 return message_id
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки/редактирования сообщения в группу {group_id}: {e}")
+            error_msg = str(e)
+            # Специальная обработка ошибки преобразования группы в супергруппу
+            if "group chat was upgraded to a supergroup chat" in error_msg or "chat not found" in error_msg.lower():
+                logger.error(
+                    f"❌ Группа {group_id} была преобразована в супергруппу или не найдена. "
+                    f"Используйте команду /getid в новой группе для получения актуального ID."
+                )
+                # Пытаемся извлечь новый ID из ошибки (если Telegram его предоставляет)
+                if "migrate_to_chat_id" in error_msg:
+                    try:
+                        import re
+                        new_id_match = re.search(r'migrate_to_chat_id[":\s]+(-?\d+)', error_msg)
+                        if new_id_match:
+                            new_id = int(new_id_match.group(1))
+                            logger.info(f"💡 Новый ID группы: {new_id}")
+                    except:
+                        pass
+            else:
+                logger.error(f"❌ Ошибка отправки/редактирования сообщения в группу {group_id}: {e}")
             return None
     
     def _send_to_all_groups(self, message_id_dict: Dict[int, Optional[int]], message: str, is_new: bool = False) -> Dict[int, Optional[int]]:
@@ -112,12 +138,17 @@ class StatusMonitor:
         
         for group_id in groups:
             msg_id = message_id_dict.get(group_id) if not is_new else None
-            new_msg_id = self._send_or_edit_group_message(group_id, msg_id, message)
+            logger.debug(f"Отправка сообщения в группу {group_id}, is_new={is_new}, msg_id={msg_id}")
+            new_msg_id = self._send_or_edit_group_message(group_id, msg_id, message, is_new=is_new)
             updated_dict[group_id] = new_msg_id
+            if new_msg_id:
+                logger.debug(f"✅ Сообщение успешно отправлено/обновлено в группу {group_id}, message_id={new_msg_id}")
+            else:
+                logger.warning(f"⚠️ Не удалось отправить/обновить сообщение в группу {group_id}")
         
         return updated_dict
     
-    def _monitor_loop(self) -> None:
+    async def _monitor_loop(self) -> None:
         """Основной цикл мониторинга."""
         first_check = True
         
@@ -125,12 +156,16 @@ class StatusMonitor:
         
         while self.is_running:
             if not self.monitoring_enabled:
-                time.sleep(60)  # Проверяем каждую минуту, если мониторинг отключен
+                await asyncio.sleep(60)  # Проверяем каждую минуту, если мониторинг отключен
                 continue
+            
+            # При первой проверке не ждем интервал - проверяем сразу
+            if not first_check:
+                await asyncio.sleep(self.config.CHECK_INTERVAL)
             
             try:
                 parse_start = current_time()
-                current_status = self.parser.parse_status()
+                current_status = await self.parser.parse_status()
                 parse_duration = current_time() - parse_start
                 
                 # Записываем метрику проверки
@@ -143,6 +178,7 @@ class StatusMonitor:
                     # Отправляем предупреждение админу при множественных ошибках
                     if self.consecutive_errors >= 5 and self.config.ADMIN_CHAT_ID:
                         try:
+                            # Используем синхронный вызов для отправки сообщения
                             self.bot.send_message(
                                 self.config.ADMIN_CHAT_ID,
                                 f"⚠️ *Предупреждение:* Бот не может получить статус Bitrix24\\.\n"
@@ -153,32 +189,131 @@ class StatusMonitor:
                         except:
                             pass
                     
-                    time.sleep(self.config.CHECK_INTERVAL)
+                    await asyncio.sleep(self.config.CHECK_INTERVAL)
                     continue
                 
                 # Успешная проверка
                 self.consecutive_errors = 0
                 self.last_successful_check = get_msk_time()
                 
+                # Логируем результат проверки
+                logger.info(f"[{get_msk_time()}] Проверка статуса: has_issues={current_status.get('has_issues')}, error={current_status.get('error')}")
+                
                 if first_check:
-                    # При первом запуске отправляем алерт только если есть сбой
+                    logger.info(f"[{get_msk_time()}] 🔍 Первая проверка при запуске бота")
+                    # При первом запуске проверяем, есть ли активный инцидент
+                    active_incident = await self.incident_tracker.get_active_incident()
+                    logger.info(f"[{get_msk_time()}] Активный инцидент в БД: {active_incident is not None}")
+                    
+                    # Если есть сбой - отправляем алерт
                     if current_status.get('has_issues') and self.config.ALERT_ON_ISSUES:
-                        self.issue_start_time = get_msk_time()
-                        self.incident_tracker.start_incident(
-                            description=current_status.get('description', ''),
-                            region=current_status.get('region', '')
-                        )
+                        logger.info(f"[{get_msk_time()}] ✅ Обнаружен сбой при первом запуске, ALERT_ON_ISSUES={self.config.ALERT_ON_ISSUES}")
+                        if not active_incident:
+                            # Нет активного инцидента - создаем новый
+                            self.issue_start_time = get_msk_time()
+                            incident_id = await self.incident_tracker.start_incident(
+                                description=current_status.get('description', ''),
+                                region=current_status.get('region', ''),
+                                components=current_status.get('components', [])
+                            )
+                            if incident_id:
+                                logger.info(f"[{get_msk_time()}] Создан новый инцидент (ID: {incident_id})")
+                        else:
+                            # Есть активный инцидент - используем его время начала
+                            self.issue_start_time = datetime.fromisoformat(active_incident['start_time'])
+                            logger.info(f"[{get_msk_time()}] Используется существующий активный инцидент (ID: {active_incident['id']})")
+                        
+                        # ВСЕГДА отправляем алерт при первом запуске, если есть сбой
                         message = format_status_message(
                             current_status,
                             self.config.URL,
                             is_alert=True,
                             start_time=self.issue_start_time
                         )
+                        logger.info(f"[{get_msk_time()}] Подготовка к отправке алерта о проблемах в группы...")
                         self.alert_message_ids = self._send_to_all_groups({}, message, is_new=True)
-                        self.metrics_collector.record_alert()
-                        logger.info(f"[{get_msk_time()}] Отправлен начальный алерт о проблемах")
+                        if self.alert_message_ids:
+                            self.metrics_collector.record_alert()
+                            logger.info(f"[{get_msk_time()}] ✅ Отправлен начальный алерт о проблемах в группы: {list(self.alert_message_ids.keys())}")
+                        else:
+                            logger.warning(f"[{get_msk_time()}] ⚠️ Не удалось отправить алерт в группы")
+                    
+                    # Если нет сбоя, но есть активный инцидент - завершаем его и отправляем алерт о восстановлении
+                    elif not current_status.get('has_issues') and active_incident and self.config.ALERT_ON_RECOVERY:
+                        # Завершаем активный инцидент
+                        incident = await self.incident_tracker.end_incident()
+                        if incident:
+                            self.issue_start_time = datetime.fromisoformat(incident['start_time'])
+                            duration = format_duration(self.issue_start_time)
+                            logger.info(f"[{get_msk_time()}] Завершен активный инцидент (ID: {incident['id']}), длительность: {duration}")
+                            
+                            # Отправляем алерт о восстановлении
+                            message = format_status_message(
+                                current_status,
+                                self.config.URL,
+                                is_alert=True,
+                                start_time=self.issue_start_time,
+                                duration=duration
+                            )
+                            self.alert_message_ids = self._send_to_all_groups({}, message, is_new=True)
+                            self.metrics_collector.record_recovery()
+                            logger.info(f"[{get_msk_time()}] Отправлен алерт о восстановлении работы сервиса")
+                            self.alert_message_ids = {}
+                            self.issue_start_time = None
+                    
+                    # Если нет сбоя и нет активного инцидента - проверяем, был ли недавний инцидент
                     else:
-                        logger.info(f"[{get_msk_time()}] Статус в норме, алерт не требуется")
+                        if not current_status.get('has_issues'):
+                            # Проверяем, был ли недавний завершенный инцидент (в последние 24 часа)
+                            recent_incidents = await self.incident_tracker.get_recent_incidents(limit=1)
+                            logger.info(f"[{get_msk_time()}] Проверка недавних инцидентов: найдено {len(recent_incidents)}")
+                            
+                            if recent_incidents and recent_incidents[0].get('status') == 'resolved':
+                                # Проверяем, был ли инцидент недавно (в последние 24 часа)
+                                from datetime import timedelta
+                                incident_end_str = recent_incidents[0].get('end_time')
+                                if incident_end_str:
+                                    incident_end = datetime.fromisoformat(incident_end_str)
+                                    time_diff = get_msk_time() - incident_end
+                                    logger.info(f"[{get_msk_time()}] Время с завершения инцидента: {time_diff}")
+                                    
+                                    # Если инцидент был завершен менее 24 часов назад, отправляем уведомление о восстановлении
+                                    if time_diff < timedelta(hours=24) and self.config.ALERT_ON_RECOVERY:
+                                        logger.info(f"[{get_msk_time()}] Обнаружен недавний завершенный инцидент (завершен {time_diff} назад), отправляем уведомление о восстановлении")
+                                        message = format_status_message(
+                                            current_status,
+                                            self.config.URL,
+                                            is_alert=True,
+                                            start_time=datetime.fromisoformat(recent_incidents[0]['start_time']),
+                                            duration=recent_incidents[0].get('duration', 'N/A')
+                                        )
+                                        self.alert_message_ids = self._send_to_all_groups({}, message, is_new=True)
+                                        self.metrics_collector.record_recovery()
+                                        logger.info(f"[{get_msk_time()}] Отправлено уведомление о восстановлении работы сервиса")
+                                    else:
+                                        logger.info(f"[{get_msk_time()}] Инцидент был завершен более 24 часов назад ({time_diff}), уведомление не требуется")
+                                else:
+                                    logger.info(f"[{get_msk_time()}] У завершенного инцидента нет end_time")
+                                    logger.info(f"[{get_msk_time()}] Статус в норме (has_issues=False), алерт не требуется")
+                            else:
+                                logger.info(f"[{get_msk_time()}] Нет недавних завершенных инцидентов (найдено: {len(recent_incidents) if recent_incidents else 0})")
+                                # При первом запуске, если статус в норме, отправляем информационное сообщение
+                                # о том, что сервис работает в штатном режиме
+                                if self.config.ALERT_ON_RECOVERY:
+                                    logger.info(f"[{get_msk_time()}] Отправляем информационное сообщение о штатной работе сервиса")
+                                    message = format_status_message(
+                                        current_status,
+                                        self.config.URL,
+                                        is_alert=False  # Информационное сообщение, не алерт
+                                    )
+                                    self.alert_message_ids = self._send_to_all_groups({}, message, is_new=True)
+                                    logger.info(f"[{get_msk_time()}] Отправлено информационное сообщение о штатной работе сервиса")
+                                else:
+                                    logger.info(f"[{get_msk_time()}] Статус в норме (has_issues=False), алерт не требуется")
+                        elif not self.config.ALERT_ON_ISSUES:
+                            logger.info(f"[{get_msk_time()}] Сбой обнаружен, но ALERT_ON_ISSUES=False, алерт не отправляется")
+                        else:
+                            logger.warning(f"[{get_msk_time()}] Неожиданное состояние: has_issues={current_status.get('has_issues')}, ALERT_ON_ISSUES={self.config.ALERT_ON_ISSUES}")
                     
                     self.previous_status = current_status
                     first_check = False
@@ -189,9 +324,10 @@ class StatusMonitor:
                         if not self.previous_status.get('has_issues') and current_status.get('has_issues'):
                             if self.config.ALERT_ON_ISSUES:
                                 self.issue_start_time = get_msk_time()
-                                self.incident_tracker.start_incident(
+                                await self.incident_tracker.start_incident(
                                     description=current_status.get('description', ''),
-                                    region=current_status.get('region', '')
+                                    region=current_status.get('region', ''),
+                                    components=current_status.get('components', [])
                                 )
                                 message = format_status_message(
                                     current_status,
@@ -206,7 +342,7 @@ class StatusMonitor:
                         # Если проблемы устранены (было СБОЙ, стало OK)
                         elif self.previous_status.get('has_issues') and not current_status.get('has_issues'):
                             if self.config.ALERT_ON_RECOVERY:
-                                incident = self.incident_tracker.end_incident()
+                                incident = await self.incident_tracker.end_incident()
                                 duration = format_duration(self.issue_start_time) if self.issue_start_time else None
                                 message = format_status_message(
                                     current_status,
@@ -248,27 +384,55 @@ class StatusMonitor:
                 logger.error(f"[{get_msk_time()}] Ошибка в мониторинге: {e}", exc_info=True)
                 self.consecutive_errors += 1
             
-            time.sleep(self.config.CHECK_INTERVAL)
+            # После первой проверки ждем интервал перед следующей
+            if not first_check:
+                await asyncio.sleep(self.config.CHECK_INTERVAL)
     
     def start(self) -> None:
-        """Запускает мониторинг в отдельном потоке."""
+        """Запускает мониторинг в отдельном потоке с собственным event loop."""
         if self.is_running:
             logger.warning("Мониторинг уже запущен")
             return
         
         self.is_running = True
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self.monitor_thread.start()
-        logger.info("Мониторинг статуса запущен в отдельном потоке")
+        # Всегда запускаем в отдельном потоке, т.к. bot.infinity_polling() блокирует event loop
+        import threading
+        def run_loop():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._monitor_loop())
+            except Exception as e:
+                logger.error(f"Ошибка в цикле мониторинга: {e}", exc_info=True)
+            finally:
+                loop.close()
+        
+        thread = threading.Thread(target=run_loop, daemon=True, name="StatusMonitor")
+        thread.start()
+        logger.info("Мониторинг статуса запущен в отдельном потоке с event loop")
     
-    def stop(self) -> None:
-        """Останавливает мониторинг."""
+    async def stop_async(self) -> None:
+        """Останавливает мониторинг (async версия)."""
         if not self.is_running:
             return
         
         self.is_running = False
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=5)
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Мониторинг статуса остановлен")
+    
+    def stop(self) -> None:
+        """Останавливает мониторинг (синхронная версия)."""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        if self.monitor_task:
+            self.monitor_task.cancel()
         logger.info("Мониторинг статуса остановлен")
     
     def get_metrics(self) -> Dict:
@@ -304,8 +468,18 @@ class StatusMonitor:
         except Exception as e:
             telegram_status = f"❌ Ошибка: {str(e)[:50]}"
         
-        # Проверяем доступность URL
-        url_available = self.parser._check_url_availability()
+        # Проверяем доступность URL (синхронная обертка для async метода)
+        url_available = False
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            url_available = loop.run_until_complete(self.parser._check_url_availability())
+        except RuntimeError:
+            # Если event loop не запущен, создаем новый
+            url_available = asyncio.run(self.parser._check_url_availability())
+        except Exception:
+            pass
+        
         url_status = "✅ Доступен" if url_available else "❌ Недоступен"
         
         metrics = self.metrics_collector.get_metrics()
