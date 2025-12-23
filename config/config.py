@@ -37,6 +37,10 @@ class BotConfig:
         self.HEALTH_CHECK_INTERVAL: int = int(os.getenv('HEALTH_CHECK_INTERVAL', '3600'))
         self.ADMIN_CHAT_ID: Optional[int] = self._parse_group_id(os.getenv('ADMIN_CHAT_ID'))
         
+        # Дедупликация алертов
+        self.DEDUP_WINDOW: int = int(os.getenv('DEDUP_WINDOW', '300'))  # 5 минут по умолчанию
+        self.GROUP_INTERVAL: int = int(os.getenv('GROUP_INTERVAL', '30'))  # 30 секунд по умолчанию
+        
     def _parse_group_id(self, value: Optional[str]) -> Optional[int]:
         """Парсит GROUP_ID из строки в int."""
         if value is None or value == '':

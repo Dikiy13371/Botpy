@@ -56,9 +56,10 @@ def create_alert_buttons() -> InlineKeyboardMarkup:
     """
     markup = InlineKeyboardMarkup()
     button1 = InlineKeyboardButton("🔄 Проверить статус сейчас", callback_data="check_status")
-    button2 = InlineKeyboardButton("📊 История инцидентов", callback_data="show_incidents")
-    markup.row(button1)
-    markup.row(button2)
+    button2 = InlineKeyboardButton("🏠 Меню", callback_data="menu_main")
+    button3 = InlineKeyboardButton("📊 История инцидентов", callback_data="show_incidents")
+    markup.row(button1, button2)  # Две кнопки в одной строке
+    markup.row(button3)  # История инцидентов отдельно
     return markup
 
 

@@ -105,3 +105,4 @@ Bad Request: group chat was upgraded to a supergroup chat
 2. Проверьте статус здоровья: `/health` в боте
 3. Проверьте метрики: `/metrics` в боте
 
+

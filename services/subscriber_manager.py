@@ -5,6 +5,9 @@ from typing import Set, List
 from services.database import Database
 
 logger = logging.getLogger(__name__)
+# Убеждаемся, что propagate включен (по умолчанию True)
+# Это позволяет сообщениям проходить в root logger
+logger.propagate = True
 
 
 class SubscriberManager:

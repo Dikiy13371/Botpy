@@ -33,3 +33,4 @@ def format_duration(start_time: datetime) -> str:
     secs = int(seconds % 60)
     return f"{hours:02}:{minutes:02}:{secs:02}"
 
+

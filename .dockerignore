@@ -43,10 +43,10 @@ ENV/
 logs/
 bot.log*
 
-# Data files
-subscribers.json
-data/
-logs/
+# Data files (исключаем из образа, но создаем в контейнере)
+data/*.db
+data/*.json
+data/*.csv
 
 # OS
 .DS_Store
@@ -56,13 +56,13 @@ Thumbs.db
 .git/
 .gitignore
 
-# Docker
-docker-compose.yml
-Dockerfile
-.dockerignore
+# Docker (не нужно исключать - они нужны для сборки)
+# docker-compose.yml
+# Dockerfile
+# .dockerignore
 
-# Documentation
-README.md
-MIGRATION.md
-*.md
+# Documentation (можно оставить для справки)
+# README.md
+# MIGRATION.md
+
 

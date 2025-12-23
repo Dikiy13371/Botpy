@@ -41,18 +41,35 @@ class BitrixStatusParser:
         self.cache: Optional[Dict] = None
         self.cache_time: float = 0
         self.session: Optional[aiohttp.ClientSession] = None
+        self.session_loop = None  # Храним event loop, в котором создана сессия
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+        # НЕ создаем timeout объект здесь - он должен создаваться внутри async контекста
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Получает или создает aiohttp сессию."""
-        if self.session is None or self.session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        """Получает или создает aiohttp сессию в текущем event loop."""
+        current_loop = asyncio.get_event_loop()
+        
+        # Если сессия не существует, закрыта, или создана в другом event loop - создаем новую
+        if (self.session is None or 
+            self.session.closed or 
+            self.session_loop is not current_loop):
+            # Закрываем старую сессию, если она существует и не закрыта
+            if self.session is not None and not self.session.closed:
+                try:
+                    await self.session.close()
+                except Exception:
+                    pass  # Игнорируем ошибки при закрытии
+            
+            # Явно устанавливаем timeout=None, чтобы избежать автоматического создания ClientTimeout
+            # Timeout будет управляться через asyncio.wait_for
             self.session = aiohttp.ClientSession(
-                timeout=timeout,
-                headers=self.headers
+                headers=self.headers,
+                timeout=None  # Явно отключаем timeout на уровне сессии
             )
+            self.session_loop = current_loop
+        
         return self.session
     
     async def close(self) -> None:
@@ -85,10 +102,19 @@ class BitrixStatusParser:
         """
         try:
             session = await self._get_session()
-            # Используем timeout из сессии или создаем новый для этого запроса
-            quick_timeout = aiohttp.ClientTimeout(total=5)
-            async with session.head(self.url, timeout=quick_timeout) as response:
-                return response.status == 200
+            # Используем asyncio.wait_for для timeout вместо передачи в aiohttp
+            async def _head_request():
+                try:
+                    async with session.head(self.url, timeout=None) as response:
+                        return response.status == 200
+                except Exception as e:
+                    logger.debug(f"Ошибка в _head_request: {e}")
+                    raise
+            
+            return await asyncio.wait_for(_head_request(), timeout=self.timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(f"URL недоступен: timeout")
+            return False
         except Exception as e:
             logger.warning(f"URL недоступен: {e}")
             return False
@@ -104,30 +130,43 @@ class BitrixStatusParser:
         
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                # Используем timeout из сессии (уже установлен при создании)
-                async with session.get(self.url, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as response:
-                    # Проверяем статус код
-                    if response.status == 502 or response.status == 503:
-                        # Сервер временно недоступен, пробуем еще раз
-                        if attempt < self.retry_attempts:
-                            delay = await self._exponential_backoff(attempt)
-                            logger.warning(
-                                f"Сервер вернул {response.status} (попытка {attempt}/{self.retry_attempts}), "
-                                f"повтор через {delay:.2f}с"
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                    
-                    response.raise_for_status()
-                    # Читаем контент и возвращаем его
-                    content = await response.read()
-                    # Создаем новый response-like объект для совместимости
-                    class ResponseWrapper:
-                        def __init__(self, content, status):
-                            self.content = content
-                            self.status = status
-                    
-                    return ResponseWrapper(content, response.status)
+                # Используем asyncio.wait_for для timeout вместо передачи в aiohttp
+                # Это полностью избегает проблем с ClientTimeout объектом
+                async def _get_request():
+                    try:
+                        # Явно передаем timeout=None, чтобы избежать создания ClientTimeout внутри
+                        async with session.get(self.url, timeout=None) as response:
+                            # Проверяем статус код
+                            if response.status == 502 or response.status == 503:
+                                # Сервер временно недоступен, пробуем еще раз
+                                if attempt < self.retry_attempts:
+                                    delay = await self._exponential_backoff(attempt)
+                                    logger.warning(
+                                        f"Сервер вернул {response.status} (попытка {attempt}/{self.retry_attempts}), "
+                                        f"повтор через {delay:.2f}с"
+                                    )
+                                    await asyncio.sleep(delay)
+                                    return None  # Сигнал для повторной попытки
+                            
+                            response.raise_for_status()
+                            # Читаем контент и возвращаем его
+                            content = await response.read()
+                            # Создаем новый response-like объект для совместимости
+                            class ResponseWrapper:
+                                def __init__(self, content, status):
+                                    self.content = content
+                                    self.status = status
+                            
+                            return ResponseWrapper(content, response.status)
+                    except Exception as e:
+                        logger.debug(f"Ошибка в _get_request: {e}")
+                        raise
+                
+                result = await asyncio.wait_for(_get_request(), timeout=self.timeout_seconds)
+                if result is None:
+                    # Сигнал для повторной попытки (502/503)
+                    continue
+                return result
                     
             except aiohttp.ClientError as e:
                 logger.warning(f"Ошибка запроса (попытка {attempt}/{self.retry_attempts}): {e}")
